@@ -1,0 +1,98 @@
+plugins {
+    id 'application'
+}
+
+group = 'mclauncher'
+version = '0.1.0'
+
+repositories {
+    maven { url 'https://maven.aliyun.com/repository/public' }
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation 'com.formdev:flatlaf:3.4.1'
+    // MP3 播放支持（自定义音乐）
+    implementation 'javazoom:jlayer:1.0.1'
+}
+
+application {
+    mainClass = 'mclauncher.App'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+// 打一个可直接双击运行的 fat jar（含 Gson / FlatLaf）
+tasks.register('fatJar', Jar) {
+    archiveBaseName = 'mclauncher'
+    archiveVersion = ''
+    manifest { attributes 'Main-Class': 'mclauncher.App' }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from sourceSets.main.output
+    dependsOn configurations.runtimeClasspath
+    from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+}
+
+// 用 jlink 生成精简运行时（比打包完整 JDK 小很多）
+tasks.register('runtimeImage', Exec) {
+    group = 'build'
+    description = 'Create a slim JRE via jlink for the exe.'
+    def jlink = "${System.getProperty('java.home')}/bin/jlink.exe"
+    def out = project.file('build/runtime-image')
+    doFirst {
+        delete out
+    }
+    // jdk.httpserver 只给 --dltest 自检用（本地 HTTP 服务），带上它分发的包里也能跑自检
+    def modules = 'java.base,java.desktop,java.net.http,java.management,java.logging,' +
+            'java.naming,jdk.crypto.ec,jdk.zipfs,jdk.unsupported,jdk.charsets,jdk.httpserver'
+    commandLine jlink,
+            '--add-modules', modules,
+            '--output', out.absolutePath,
+            '--strip-debug', '--no-header-files', '--no-man-pages', '--compress=2'
+}
+
+// 使用 jpackage 打包成 Windows exe（app-image，自含精简 JRE，双击 dist/MineLauncher/MineLauncher.exe）
+tasks.register('exe', Exec) {
+    group = 'build'
+    description = 'Pack a native Windows .exe via jpackage (bundled slim JRE).'
+    dependsOn fatJar, runtimeImage
+    def jpackage = "${System.getProperty('java.home')}/bin/jpackage.exe"
+    doFirst {
+        try {
+            delete project.file('dist')
+        } catch (Exception e) {
+            throw new GradleException('无法清理 dist 目录：请先关闭正在运行的 MineLauncher.exe（它占用了 dist 里的文件）再重试。\n'
+                    + e.message)
+        }
+    }
+    commandLine jpackage,
+            '--type', 'app-image',
+            '--name', 'MineLauncher',
+            '--app-version', '0.1.0',
+            '--input', 'build/libs',
+            '--main-jar', 'mclauncher.jar',
+            '--main-class', 'mclauncher.App',
+            '--icon', project.file('src/main/resources/icon.ico').absolutePath,
+            '--dest', 'dist',
+            '--runtime-image', project.file('build/runtime-image').absolutePath,
+            '--java-options', '-Dfile.encoding=UTF-8'
+    doLast {
+        if (!project.file('dist/MineLauncher/app/MineLauncher.cfg').exists()) {
+            throw new GradleException('jpackage 产物不完整（缺少 MineLauncher.cfg），这是 jpackage 偶发问题，请再执行一次 gradlew exe')
+        }
+        // 随分发包带一份给最终用户看的说明（解压即用，别再让收到的人猜怎么跑）
+        copy {
+            from project.file('使用说明.txt')
+            into project.file('dist/MineLauncher')
+        }
+    }
+}
